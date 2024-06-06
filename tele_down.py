@@ -7,7 +7,7 @@ import asyncio
 import telethon.errors.rpcerrorlist  # Ensure this is imported to handle specific errors
 
 # Define the path to the config file
-config_path = 'config.ini'
+config_path = 'theconfig.ini'
 
 # Read the configuration file
 config = configparser.ConfigParser()
