@@ -1,0 +1,12 @@
+# Ignore the original script
+teledown.py
+
+# Ignore the example config file
+config.ini
+
+# Ignore virtual environment
+venv/
+
+# Ignore compiled Python files
+__pycache__/
+*.py[cod]
