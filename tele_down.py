@@ -1,32 +1,34 @@
-from telethon import TelegramClient
+from telethon import TelegramClient, errors
 from telethon.tl.types import InputMessagesFilterVideo
 import os
 import configparser
 import re
 import asyncio
 import telethon.errors.rpcerrorlist  # Ensure this is imported to handle specific errors
+from collections import defaultdict
+import signal
 
-# Define the path to the config file
-config_path = 'theconfig.ini'
+# Define the path to the config file in the current working directory
+current_dir = os.getcwd()
+config_path = os.path.join(current_dir, 'theconfig.ini')
 
 # Read the configuration file
 config = configparser.ConfigParser()
+
+# Debugging: Print raw content of config file
+with open(config_path, 'r') as file:
+    config_content = file.read()
+    print(f"Raw content of config.ini:\n{config_content}")
+
 config.read(config_path)
+print("Configuration file read successfully.")
+print(f"Sections found in config file: {config.sections()}")
 
 # Check if the 'telegram' section exists
 if 'telegram' not in config:
     raise KeyError("Missing 'telegram' section in config.ini")
 
-# Extract the API ID and hash or connect directly to Telegram
-# If you prefer to connect directly to Telegram without extracting API ID and hash from a config file,
-# you can do so by hardcoding the values as shown below:
-# 
-# api_id = 'YOUR_API_ID'
-# api_hash = 'YOUR_API_HASH'
-# 
-# Make sure to replace 'YOUR_API_ID' and 'YOUR_API_HASH' with your actual Telegram API credentials.
-# Hardcoding credentials is not recommended for production code as it poses a security risk.
-# Always prefer using secure methods such as environment variables or config files for sensitive information.
+# Extract the API ID and hash
 try:
     api_id = config['telegram']['api_id']
     api_hash = config['telegram']['api_hash']
@@ -34,13 +36,15 @@ try:
 except KeyError as e:
     raise KeyError(f"Missing key in config.ini: {e}")
 
-# Define the download folder
-base_download_folder = 'YOUR_DOWNLOAD_PATH'
-download_folder = os.path.join(base_download_folder, 'Videos')
+# Define the download folder and target channel
+download_folder = os.path.join(current_dir, 'teledown_folder')
+
 if not os.path.exists(download_folder):
     os.makedirs(download_folder)
 
-# Initialize the Telegram client
+target_channel = config['telegram'].get('target_channel', 'YOUR_CHANNEL_NAME')
+
+# Initialize the Telegram client with the new session name 'telegram_video_downloader'
 client = TelegramClient('telegram_video_downloader', api_id, api_hash)
 
 def sanitize_filename(text):
@@ -53,15 +57,13 @@ def sanitize_filename(text):
 
 def get_existing_files():
     # Get a dictionary of existing files with their sizes and names
-    existing_files = {}
+    existing_files = defaultdict(list)
     for filename in os.listdir(download_folder):
         if filename.endswith('.mp4'):
             filepath = os.path.join(download_folder, filename)
             size = os.path.getsize(filepath)
-            if size not in existing_files:
-                existing_files[size] = []
             existing_files[size].append(filename)
-    return existing_files
+    return dict(existing_files)
 
 def existing_file_matches_text(existing_files, video_size, sanitized_text):
     if video_size in existing_files:
@@ -79,9 +81,6 @@ async def print_smiley():
         counter += 10
 
 async def main():
-    # Define the target channel name
-    target_channel = 'YOUR_CHANNEL_NAME'
-    
     # Start the background task to print ":)" every 10 seconds
     smiley_task = asyncio.create_task(print_smiley())
 
@@ -139,8 +138,6 @@ async def main():
                     processed_messages.add(message.id)
                     
                     # Add the new file to existing_files
-                    if video_size not in existing_files:
-                        existing_files[video_size] = []
                     existing_files[video_size].append(os.path.basename(video_file_path))
                 except telethon.errors.rpcerrorlist.FileReferenceExpiredError:
                     print(f'File reference expired for message ID: {message.id}, attempting to refresh...')
@@ -151,8 +148,6 @@ async def main():
                         print(f'Downloaded video after refresh: {video_file_path}')
                         downloaded_videos += 1
                         processed_messages.add(fresh_message.id)
-                        if video_size not in existing_files:
-                            existing_files[video_size] = []
                         existing_files[video_size].append(os.path.basename(video_file_path))
                     except Exception as e:
                         print(f'Error downloading refreshed video: {e}')
@@ -168,23 +163,46 @@ async def main():
             await smiley_task
         except asyncio.CancelledError:
             pass
-        print(f'All videos downloaded successfully! Total videos downloaded: {downloaded_videos}. Total videos skipped: {skipped_videos}. The script has finished running. Enjoy your videos! :)')
+        print(f'Operation end: Total videos downloaded: {downloaded_videos}. Total videos skipped: {skipped_videos}.\nThe script has finished running. Stay sharp :)')
         await client.disconnect()
 
-def shutdown():
-    print("Received exit signal... Shutting down gracefully.")
-    for task in asyncio.all_tasks():
-        task.cancel()
+def shutdown(signal, frame):
+    response = input("Are you sure you want to exit? (y/n): ")
+    if response.lower() == 'y':
+        print("Exiting...")
+        for task in asyncio.all_tasks():
+            task.cancel()
+        asyncio.get_event_loop().stop()
+    else:
+        print("Continuing...")
+
+async def run_with_retries(client, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            async with client:
+                await main()
+            break
+        except errors.FloodWaitError as e:
+            print(f"Flood wait error: Waiting for {e.seconds} seconds before retrying...")
+            await asyncio.sleep(e.seconds)
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if attempt + 1 == max_retries:
+                print("Max retries reached. Exiting.")
+                break
+            print("Retrying...")
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    # Register the signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, shutdown)
+
     try:
-        with client:
-            loop.run_until_complete(main())
+        loop.run_until_complete(run_with_retries(client))
     except (KeyboardInterrupt, SystemExit):
-        shutdown()
+        shutdown(signal.SIGINT, None)
         loop.run_until_complete(asyncio.sleep(0.1))  # Allow all tasks to cancel
     finally:
         loop.close()
